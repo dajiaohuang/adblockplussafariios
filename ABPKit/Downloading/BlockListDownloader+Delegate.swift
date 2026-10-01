@@ -71,8 +71,11 @@ extension BlockListDownloader {
         let destination =
             containerURL?.appendingPathComponent(fileName,
                                                  isDirectory: false)
-        moveOrReplaceItem(source: location,
-                          destination: destination)
+        guard moveOrReplaceItem(source: location,
+                                destination: destination) else {
+            reportError(identifier: taskInt, error: .failedFileCreation)
+            return
+        }
         list.lastUpdate = Date()
         list.downloaded = true
         list.lastUpdateFailed = false
@@ -101,35 +104,45 @@ extension BlockListDownloader {
                     didCompleteWithError error: Error?) {
         let taskInt = task.taskIdentifier
         let taskIdentifier = UIBackgroundTaskIdentifier(rawValue: taskInt)
+        var newEvent = lastDownloadEvent(taskID: taskIdentifier) ?? DownloadEvent()
+        if let error = error {
+            newEvent.error = error
+        }
+        if newEvent.error == nil && newEvent.didFinishDownloading != true {
+            newEvent.error = ABPDownloadTaskError.downloadDidNotFinish
+        }
         guard let name = try? filterListName(for: taskInt)
         else {
-            reportError(identifier: taskInt, error: .badFilterListModelName)
+            if newEvent.error == nil {
+                newEvent.error = ABPDownloadTaskError.badFilterListModelName
+            }
+            newEvent.errorWritten = true
+            finishDownloadEvent(newEvent, taskID: taskIdentifier)
             return
         }
         guard let result = try? filterList(withName: name),
               var list = result
         else {
-            reportError(identifier: taskInt, error: .badFilterListModel)
+            if newEvent.error == nil {
+                newEvent.error = ABPDownloadTaskError.badFilterListModel
+            }
+            newEvent.errorWritten = true
+            finishDownloadEvent(newEvent, taskID: taskIdentifier)
             return
         }
-        list.lastUpdateFailed = true
+        list.lastUpdateFailed = newEvent.failed
         list.updating = false
         list.taskIdentifier = nil
         guard let saveResult = try? pstr.saveFilterListModel(list),
               saveResult == true
         else {
-            reportError(identifier: taskInt, error: .failedFilterListModelSave)
+            newEvent.error = ABPDownloadTaskError.failedFilterListModelSave
+            newEvent.errorWritten = true
+            finishDownloadEvent(newEvent, taskID: taskIdentifier)
             return
         }
-        downloadTasksByID[taskIdentifier] = nil
-        if var newEvent = lastDownloadEvent(taskID: taskIdentifier) {
-            if error != nil {
-                newEvent.error = error
-            }
-            newEvent.errorWritten = true
-            downloadEvents[taskIdentifier]?.onNext(newEvent)
-            downloadEvents[taskIdentifier]?.onCompleted()
-        }
+        newEvent.errorWritten = true
+        finishDownloadEvent(newEvent, taskID: taskIdentifier)
     }
 
     private
@@ -141,5 +154,13 @@ extension BlockListDownloader {
             newEvent.errorWritten = true
             downloadEvents[taskIdentifier]?.onNext(newEvent) // new event
         }
+    }
+
+    private
+    func finishDownloadEvent(_ event: DownloadEvent,
+                             taskID: UIBackgroundTaskIdentifier) {
+        downloadTasksByID[taskID] = nil
+        downloadEvents[taskID]?.onNext(event)
+        downloadEvents[taskID]?.onCompleted()
     }
 }

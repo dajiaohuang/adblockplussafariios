@@ -17,6 +17,7 @@
 
 @testable import ABPKit
 
+import Foundation
 import RxSwift
 import XCTest
 
@@ -97,6 +98,79 @@ class BlockListDownloadTests: XCTestCase {
             }).disposed(by: bag)
         wait(for: [expect],
              timeout: timeout)
+    }
+
+    func testSuccessfulCompletionDoesNotMarkListAsFailed() {
+        guard let list = completeDownload(didFinish: true,
+                                          transportError: nil,
+                                          processingError: nil) else {
+            XCTFail("Failed to load completed model.")
+            return
+        }
+        XCTAssert(list.lastUpdateFailed == false,
+                  "Successful download should not be marked as failed.")
+    }
+
+    func testTransportFailureIsRetainedAtCompletion() {
+        let error = NSError(domain: "BlockListDownloadTests", code: 1)
+        guard let list = completeDownload(didFinish: false,
+                                          transportError: error,
+                                          processingError: nil) else {
+            XCTFail("Failed to load failed model.")
+            return
+        }
+        XCTAssert(list.lastUpdateFailed == true,
+                  "Transport failure should be marked as failed.")
+    }
+
+    func testProcessingFailureIsRetainedAtCompletion() {
+        guard let list = completeDownload(didFinish: true,
+                                          transportError: nil,
+                                          processingError: ABPDownloadTaskError.invalidResponse) else {
+            XCTFail("Failed to load failed model.")
+            return
+        }
+        XCTAssert(list.lastUpdateFailed == true,
+                  "HTTP or file processing failure should be marked as failed.")
+    }
+
+    func testCompletionWithoutFinishCallbackIsFailure() {
+        guard let list = completeDownload(didFinish: false,
+                                          transportError: nil,
+                                          processingError: nil) else {
+            XCTFail("Failed to load failed model.")
+            return
+        }
+        XCTAssert(list.lastUpdateFailed == true,
+                  "A task without a successful finish callback should be marked as failed.")
+    }
+
+    private func completeDownload(didFinish: Bool,
+                                  transportError: Error?,
+                                  processingError: Error?) -> FilterList? {
+        let session = URLSession(configuration: .ephemeral)
+        guard let url = URL(string: "https://example.com") else { return nil }
+        let task = session.downloadTask(with: url)
+        testList.taskIdentifier = task.taskIdentifier
+        testList.lastUpdateFailed = nil
+        guard let saved = try? pstr.saveFilterListModel(testList), saved else {
+            task.cancel()
+            return nil
+        }
+        let taskID = UIBackgroundTaskIdentifier(rawValue: task.taskIdentifier)
+        dler.downloadEvents[taskID] =
+            BehaviorSubject<DownloadEvent>(value: DownloadEvent(filterListName: testList.name,
+                                                                 didFinishDownloading: didFinish,
+                                                                 totalBytesWritten: 0,
+                                                                 error: processingError,
+                                                                 errorWritten: false))
+
+        dler.urlSession(session,
+                        task: task,
+                        didCompleteWithError: transportError)
+        task.cancel()
+        guard let models = try? pstr.loadFilterListModels() else { return nil }
+        return models.first(where: { $0.name == testList.name })
     }
 
     private

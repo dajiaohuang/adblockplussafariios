@@ -52,32 +52,28 @@ extension BlockListDownloader {
         return result
     }
 
-    /// Move a file to a destination. If the file exists, it will be first removed, if possible.
-    /// If the operation cannot be completed, the function will return without an error.
+    /// Move a file to a destination, replacing an existing file when possible.
+    /// - Returns: True if the move completed successfully.
     internal
     func moveOrReplaceItem(source: URL,
-                           destination: URL?) {
-        guard let uwDestination = destination else { return }
+                           destination: URL?) -> Bool {
+        guard let uwDestination = destination else { return false }
         let fileManager = FileManager.default
         let destPath = uwDestination.path
         let exists = fileManager.fileExists(atPath: destPath)
-        var removeError: Error?
         if exists {
-            do { try fileManager.removeItem(atPath: destPath)
-            } catch let error {
-                removeError = error
+            do {
+                try fileManager.removeItem(atPath: destPath)
+            } catch {
+                return false
             }
         }
-        if removeError == nil {
-            do { try fileManager.moveItem(at: source,
-                                          to: uwDestination)
-            } catch {
-                // Move error occurred.
-                return
-            }
-        } else {
-            // Remove error occurred.
-            return
+        do {
+            try fileManager.moveItem(at: source,
+                                     to: uwDestination)
+            return true
+        } catch {
+            return false
         }
     }
 }

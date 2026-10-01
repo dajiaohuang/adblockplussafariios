@@ -232,14 +232,19 @@ class FilterListsUpdater: AdblockPlusShared,
         return Observable.create { observer in
             return self.downloadEvents[taskID]!
                 .filter { event -> Bool in
-                    return event.didFinishDownloading == true &&
-                           event.errorWritten == true
+                    return event.errorWritten == true &&
+                           (event.didFinishDownloading == true || event.error != nil)
                 }.subscribe(onNext: { _ in
+                    if let error = self.lastDownloadEvent(taskID: taskID)?.error {
+                        observer.onError(error)
+                        return
+                    }
                     self.safariCB.reloadContentBlocker { error in
                         if error == nil {
                             observer.onNext(update)
                             observer.onCompleted()
                         } else {
+                            self.markUpdateFailed(update)
                             observer.onError(error!)
                         }
                     }
@@ -248,6 +253,20 @@ class FilterListsUpdater: AdblockPlusShared,
                 })
         }.timeout(downloadLimit(),
                   scheduler: MainScheduler.asyncInstance)
+    }
+
+    private func markUpdateFailed(_ update: FilterListUpdate) {
+        guard let name = update.filterList.name,
+              let manager = abpManager else { return }
+        var lists = manager.filterLists()
+        var updated = false
+        for index in lists.indices where lists[index].name == name {
+            lists[index].lastUpdateFailed = true
+            updated = true
+        }
+        if updated {
+            manager.saveFilterLists(lists)
+        }
     }
 
     /// Update filter lists with statuses of tasks running while the app is in the background.

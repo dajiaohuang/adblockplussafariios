@@ -53,20 +53,32 @@ extension FilterListsUpdater {
     func urlSession(_ session: URLSession,
                     task: URLSessionTask,
                     didCompleteWithError error: Error?) {
-        if var lastEvent = lastDownloadEvent(taskID: task.taskIdentifier) {
-            lastEvent.error = error
-            lastEvent.errorWritten = true
-            downloadEvents[task.taskIdentifier]?.onNext(lastEvent)
+        var lastEvent = lastDownloadEvent(taskID: task.taskIdentifier)
+        if var event = lastEvent {
+            event.error = error ?? event.error
+            if event.error == nil && event.didFinishDownloading != true {
+                event.error = ABPDownloadTaskError.downloadDidNotFinish
+            }
+            event.errorWritten = true
+            lastEvent = event
         }
-        let name = filterListNameForTaskTaskIdentifier(taskIdentifier: task.taskIdentifier)
-        guard let uwName = name else { return }
-        guard var list = filterList(withName: name) else { return }
-        list.lastUpdateFailed = true
-        list.updating = false
-        list.taskIdentifier = nil
-        replaceFilterList(withName: uwName,
-                          withNewList: list)
         downloadTasksByID[task.taskIdentifier] = nil
+        let name = filterListNameForTaskTaskIdentifier(taskIdentifier: task.taskIdentifier)
+        if let uwName = name, var list = filterList(withName: name) {
+            let downloadFailed = error != nil || (lastEvent?.failed ?? true)
+            if downloadFailed {
+                list.lastUpdateFailed = true
+            }
+            list.updating = false
+            list.taskIdentifier = nil
+            replaceFilterList(withName: uwName,
+                              withNewList: list)
+        }
+        // Persist terminal state before observers reload the blocker or update the model.
+        if let event = lastEvent {
+            downloadEvents[task.taskIdentifier]?.onNext(event)
+            downloadEvents[task.taskIdentifier]?.onCompleted()
+        }
     }
 
     /// A download task for a filter list has finished downloading. Update the user's filter list
@@ -81,45 +93,72 @@ extension FilterListsUpdater {
             downloadEvents[downloadTask.taskIdentifier]?.onNext(lastEvent) // new event
         }
         let name = filterListNameForTaskTaskIdentifier(taskIdentifier: downloadTask.taskIdentifier)
-        guard let uwName = name else { return }
-        guard var list = filterList(withName: name) else { return }
+        guard let uwName = name else {
+            reportError(identifier: downloadTask.taskIdentifier,
+                        error: ABPDownloadTaskError.badFilterListModelName)
+            return
+        }
+        guard var list = filterList(withName: name) else {
+            reportError(identifier: downloadTask.taskIdentifier,
+                        error: ABPDownloadTaskError.badFilterListModel)
+            return
+        }
         let response = downloadTask.response as? HTTPURLResponse
         if !validURLResponse(response) {
+            reportError(identifier: downloadTask.taskIdentifier,
+                        error: ABPDownloadTaskError.invalidResponse)
             return
         }
         let fileManager = FileManager.default
         guard let group = try? cfg.appGroup() else {
+            reportError(identifier: downloadTask.taskIdentifier,
+                        error: ABPDownloadTaskError.badAppGroup)
             return
         }
         let containerURL = fileManager.containerURL(forSecurityApplicationGroupIdentifier: group)
-        guard let fileName = list.fileName else { return }
+        guard let fileName = list.fileName else {
+            reportError(identifier: downloadTask.taskIdentifier,
+                        error: ABPDownloadTaskError.badFilename)
+            return
+        }
         let destination = containerURL?.appendingPathComponent(fileName,
                                                                isDirectory: false)
-        moveOrReplaceItem(source: location,
-                          destination: destination)
+        guard moveOrReplaceItem(source: location,
+                                 destination: destination) else {
+            reportError(identifier: downloadTask.taskIdentifier,
+                        error: ABPFilterListError.failedFileCreation)
+            return
+        }
         list.lastUpdate = Date()
         list.downloaded = true
-        list.lastUpdateFailed = false
         list.updating = false
-        list.taskIdentifier = nil
-        downloadedVersion += 1
-        AppExtensionRelay.sharedInstance().downloadedVersion.accept(downloadedVersion)
-
         // Test parsing of the filter list and set the version.
-        guard let objcList = list.toDictionary() else { return }
+        guard let objcList = list.toDictionary() else {
+            reportError(identifier: downloadTask.taskIdentifier,
+                        error: ABPDownloadTaskError.badFilterListModel)
+            return
+        }
         let bridge = FilterListSwiftBridge(dictionary: objcList)
-        guard let uwDestination = destination else { return }
+        guard let uwDestination = destination else {
+            reportError(identifier: downloadTask.taskIdentifier,
+                        error: ABPDownloadTaskError.badAppGroup)
+            return
+        }
         do {
             try bridge.parseFilterList(from: uwDestination)
             try setVersion(url: uwDestination,
                            filterList: &list)
         } catch {
+            reportError(identifier: downloadTask.taskIdentifier,
+                        error: error)
             return
         }
 
         // Save the modified filter list.
         replaceFilterList(withName: uwName,
                           withNewList: list)
+        downloadedVersion += 1
+        AppExtensionRelay.sharedInstance().downloadedVersion.accept(downloadedVersion)
     }
 
     /// Parse the v2 filter list version and set it on the internal filter list model struct.
@@ -143,31 +182,27 @@ extension FilterListsUpdater {
     // MARK: - Private -
     // ------------------------------------------------------------
 
-    /// Move a file to a destination. If the file exists, it will be first removed, if possible.
-    /// If the operation cannot be completed, the function will return without an error.
+    /// Move a file to a destination, replacing an existing file when possible.
+    /// - Returns: True if the move completed successfully.
     private func moveOrReplaceItem(source: URL,
-                                   destination: URL?) {
-        guard let uwDestination = destination else { return }
+                                   destination: URL?) -> Bool {
+        guard let uwDestination = destination else { return false }
         let fileManager = FileManager.default
         let destPath = uwDestination.path
         let exists = fileManager.fileExists(atPath: destPath)
-        var removeError: Error?
         if exists {
-            do { try fileManager.removeItem(atPath: destPath)
-            } catch let error {
-                removeError = error
+            do {
+                try fileManager.removeItem(atPath: destPath)
+            } catch {
+                return false
             }
         }
-        if removeError == nil {
-            do { try fileManager.moveItem(at: source,
-                                          to: uwDestination)
-            } catch {
-                // Move error occurred.
-                return
-            }
-        } else {
-            // Remove error occurred.
-            return
+        do {
+            try fileManager.moveItem(at: source,
+                                     to: uwDestination)
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -180,6 +215,15 @@ extension FilterListsUpdater {
             }
         }
         return false
+    }
+
+    private func reportError(identifier: Int,
+                             error: Error) {
+        let taskID = UIBackgroundTaskIdentifier(rawValue: identifier)
+        if var lastEvent = lastDownloadEvent(taskID: taskID) {
+            lastEvent.error = error
+            downloadEvents[taskID]?.onNext(lastEvent)
+        }
     }
 
     /// Replace an existing filter list with a new one.

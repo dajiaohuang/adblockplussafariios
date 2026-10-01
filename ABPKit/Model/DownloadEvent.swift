@@ -24,6 +24,11 @@ public struct DownloadEvent {
     /// This may no longer be needed outside of the legacy implementation.
     public var errorWritten: Bool?
 
+    /// A download is considered failed if it has an error or never reached its finish callback.
+    public var failed: Bool {
+        return error != nil || didFinishDownloading != true
+    }
+
     public init(filterListName: FilterListName?,
                 didFinishDownloading: Bool?,
                 totalBytesWritten: Int64?,

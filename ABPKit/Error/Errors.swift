@@ -32,6 +32,8 @@ enum ABPConfigurationError: Error {
 /// - failedFilterListModelSave: Failed to save model object.
 /// - failedToMakeBackgroundSession: Failed during background session creation.
 /// - failedToMakeDownloadTask: Download task could not be created for the download.
+/// - failedFileCreation: Downloaded filter list could not be moved to storage.
+/// - downloadDidNotFinish: Download completed without a successful download callback.
 /// - invalidResponse: Web server response was invalid.
 /// - tooManyRequests: HTTP connection failed due to temporary state.
 public
@@ -43,6 +45,8 @@ enum ABPDownloadTaskError: Error {
     case failedFilterListModelSave
     case failedToMakeBackgroundSession
     case failedToMakeDownloadTask
+    case failedFileCreation
+    case downloadDidNotFinish
     case invalidResponse
     case tooManyRequests
 }
